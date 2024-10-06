@@ -31,35 +31,29 @@ def sort_slices(input_directory):
 
 def file_processing(fre_files, input_directory, output_directory, header_directory, study_instance_uid, series_instance_uid):
     for filename in fre_files:
+        file_index = filename[4:8]
+        # Concatenate to take only the thigh
+        if int(file_index) <= 2028:
+            continue
         fre_file_path = os.path.join(input_directory, filename)
         # Corresponding header file path
-        header_filename = filename + '.txt'  # Assuming the header files are named 'c_vm1734.fre.txt'
+        header_filename = filename + '.txt'
         header_file_path = os.path.join(header_directory, header_filename)
 
-        # Read the .fre file
         with open(fre_file_path, 'rb') as f:
             header_bytes = f.read(3416)  # Header size
             image_data_bytes = f.read()
 
-        # Read the header file to get the slice location
-        slice_location = get_slice_location(header_file_path)
-        print(slice_location)
-        if slice_location is None:
-            print(f"Slice location not found for file {header_filename}")
-            continue  # Skip this file or handle accordingly
-
-        # Convert image data to numpy array
+        params = parse_header_file(header_file_path)
+        slice_location = params.get('slice_location')
         img_array = img_data_to_np_array(image_data_bytes).byteswap()
 
-        # Output DICOM file path
         output_filename = os.path.splitext(filename)[0] + '.dcm'
         output_dcm_path = os.path.join(output_directory, output_filename)
 
-        # Extract image number for InstanceNumber
         instance_number = extract_image_number(filename)
 
-        # Create the DICOM file
-        create_dicom(img_array, slice_location, output_dcm_path, instance_number, study_instance_uid, series_instance_uid)
+        create_dicom(img_array, slice_location, output_dcm_path, instance_number, study_instance_uid, series_instance_uid, params)
 
 def get_slice_location(header_file_path):
     with open(header_file_path, 'r') as f:
@@ -68,11 +62,22 @@ def get_slice_location(header_file_path):
             if match:
                 slice_location = float(match.group(1))
                 return slice_location
-    # If not found, return None or raise an error
+            
     print(f"Slice location not found in {header_file_path}")
     return None
 
-def create_dicom(img_array, slice_location, output_dcm_path, instance_number, study_instance_uid, series_instance_uid):
+def get_normal_s_coord(header_file_path):
+    with open(header_file_path, 'r') as f:
+        for line in f:
+            match = re.search(r'Normal S coord.*?: ([\-\d\.]+)', line)
+            if match:
+                slice_location = float(match.group(1))
+                return slice_location
+    
+    print(f"Normal S Coord not found in {header_file_path}")
+    return None
+
+def create_dicom(img_array, slice_location, output_dcm_path, instance_number, study_instance_uid, series_instance_uid, params):
     # Create a FileDataset instance (initially empty)
     file_meta = pydicom.Dataset()
     ds = FileDataset(output_dcm_path, {}, file_meta=file_meta, preamble=b"\0" * 128)
@@ -90,51 +95,69 @@ def create_dicom(img_array, slice_location, output_dcm_path, instance_number, st
     # Set pixel representation
     ds.SamplesPerPixel = 1
     ds.PhotometricInterpretation = 'MONOCHROME2'
-    ds.BitsAllocated = 16
-    ds.BitsStored = 16
-    ds.HighBit = 15
-    ds.PixelRepresentation = 0  # Unsigned integer
+    ds.BitsAllocated = int(params.get('bits_allocated', 16))
+    ds.BitsStored = int(params.get('bits_stored', 16))
+    ds.HighBit = int(params.get('high_bit', 15))
+    ds.PixelRepresentation = int(params.get('pixel_representation', 0))  # Unsigned integer
 
     # Set pixel spacing and slice thickness
-    ds.PixelSpacing = [str(0.898438), str(0.898438)]
-    ds.SliceThickness = str(3)
+    ds.PixelSpacing = [
+        str(params.get('pixel_spacing_x', '0.898438')),
+        str(params.get('pixel_spacing_y', '0.898438'))
+    ]
+    ds.SliceThickness = str(params.get('slice_thickness', '3'))
 
     # Set patient information
-    ds.PatientName = 'huntsville'
-    ds.PatientID = '1109pm 8/5/9'
-    ds.PatientSex = 'M'  # 'M' for Male
-    ds.PatientAge = '000Y'  # Age not specified; adjust if known
+    ds.PatientName = params.get('patient_name', 'Unknown')
+    ds.PatientID = params.get('patient_id', 'Unknown')
+    ds.PatientSex = params.get('patient_sex', 'M')
+    ds.PatientAge = params.get('patient_age', '000Y')  # Adjust if known
 
-    # Parse and set study date and time
-    exam_datetime_str = 'Thu Aug  5 19:10:38 1993'
-    exam_datetime = datetime.datetime.strptime(exam_datetime_str, '%a %b %d %H:%M:%S %Y')
-    ds.StudyDate = exam_datetime.strftime('%Y%m%d')
-    ds.StudyTime = exam_datetime.strftime('%H%M%S')
+    # Set study date and time
+    ds.StudyDate = params.get('study_date', '')
+    ds.StudyTime = params.get('study_time', '')
 
     # Set study information
     ds.StudyInstanceUID = study_instance_uid
-    ds.StudyID = '1174'
-    ds.AccessionNumber = '1174'  # Use Exam Number if applicable
-    ds.ReferringPhysicianName = ''
+    ds.StudyID = params.get('study_id', '1174')
+    ds.AccessionNumber = params.get('accession_number', '1174')
+    ds.ReferringPhysicianName = params.get('referring_physician_name', '')
 
     # Set series information
     ds.SeriesInstanceUID = series_instance_uid
-    ds.SeriesNumber = '2'
-    ds.Modality = 'CT'
+    ds.SeriesNumber = params.get('series_number', '2')
+    ds.Modality = params.get('modality', 'CT')
 
-    # Parse and set acquisition date and time
-    image_datetime_str = 'Thu Aug  5 20:27:13 1993'
-    image_datetime = datetime.datetime.strptime(image_datetime_str, '%a %b %d %H:%M:%S %Y')
-    ds.AcquisitionDate = image_datetime.strftime('%Y%m%d')
-    ds.AcquisitionTime = image_datetime.strftime('%H%M%S')
+    # Set acquisition date and time
+    ds.AcquisitionDate = params.get('acquisition_date', '')
+    ds.AcquisitionTime = params.get('acquisition_time', '')
 
     # Set image information
     ds.SOPInstanceUID = pydicom.uid.generate_uid()
     ds.InstanceNumber = str(instance_number)
 
     # Set image position and orientation
-    ds.ImagePositionPatient = ['-2', '61', str(slice_location)]
-    ds.ImageOrientationPatient = ['1', '0', '0', '0', '1', '0']  # Assuming standard orientation
+    ds.ImagePositionPatient = [
+        str(params.get('center_r', '-2.0')),
+        str(params.get('center_a', '61.0')),
+        str(slice_location)
+    ]
+
+    # Handle ImageOrientationPatient
+    normal_r = float(params.get('normal_r', '0.0'))
+    normal_a = float(params.get('normal_a', '0.0'))
+    normal_s = float(params.get('normal_s', '1.0'))
+
+    # Default orientation for axial images
+    ds.ImageOrientationPatient = ['1', '0', '0', '0', '1', '0']
+
+    # Adjust orientation based on Normal S Coord
+    if normal_s == -1.0:
+        # Invert the second vector
+        ds.ImageOrientationPatient = ['1', '0', '0', '0', '-1', '0']
+
+    # Set patient position
+    ds.PatientPosition = params.get('patient_position', 'FFS')
 
     # Set the necessary flags
     ds.is_little_endian = True
@@ -142,6 +165,130 @@ def create_dicom(img_array, slice_location, output_dcm_path, instance_number, st
 
     # Save the DICOM file
     pydicom.dcmwrite(output_dcm_path, ds)
+
+def parse_header_file(header_file_path):
+    params = {}
+    with open(header_file_path, 'r') as f:
+        lines = f.readlines()
+
+    for line in lines:
+        # Extract Image Location
+        match = re.search(r'Image location.*?: ([\-\d\.]+)', line)
+        if match:
+            params['slice_location'] = float(match.group(1))
+            continue
+
+        # Extract Normal S Coord
+        match = re.search(r'Normal S coord.*?: ([\-\d\.]+)', line)
+        if match:
+            params['normal_s_coord'] = float(match.group(1))
+            continue
+
+        # Extract Pixel Spacing X and Y
+        match = re.search(r'Image pixel size - X.*?: ([\d\.]+)', line)
+        if match:
+            params['pixel_spacing_x'] = float(match.group(1))
+            continue
+
+        match = re.search(r'Image pixel size - Y.*?: ([\d\.]+)', line)
+        if match:
+            params['pixel_spacing_y'] = float(match.group(1))
+            continue
+
+        # Extract Slice Thickness
+        match = re.search(r'Slice Thickness \(mm\).*?: ([\d\.]+)', line)
+        if match:
+            params['slice_thickness'] = float(match.group(1))
+            continue
+
+        # Extract Image Orientation Patient (Normal vectors)
+        match = re.search(r'Normal R coord.*?: ([\-\d\.]+)', line)
+        if match:
+            params['normal_r'] = float(match.group(1))
+            continue
+
+        match = re.search(r'Normal A coord.*?: ([\-\d\.]+)', line)
+        if match:
+            params['normal_a'] = float(match.group(1))
+            continue
+
+        match = re.search(r'Normal S coord.*?: ([\-\d\.]+)', line)
+        if match:
+            params['normal_s'] = float(match.group(1))
+            continue
+
+        # Extract Image Position Patient (Center coordinates)
+        match = re.search(r'Center R coord of plane image.*?: ([\-\d\.]+)', line)
+        if match:
+            params['center_r'] = float(match.group(1))
+            continue
+
+        match = re.search(r'Center A coord of plane image.*?: ([\-\d\.]+)', line)
+        if match:
+            params['center_a'] = float(match.group(1))
+            continue
+
+        match = re.search(r'Center S coord of Plane image.*?: ([\-\d\.]+)', line)
+        if match:
+            params['center_s'] = float(match.group(1))
+            continue
+
+        # Extract Patient Position
+        match = re.search(r'Patient Position.*?: (\d+)', line)
+        if match:
+            patient_position_code = int(match.group(1))
+            if patient_position_code == 1:
+                params['patient_position'] = 'FFS'  # Feet First Supine
+            elif patient_position_code == 2:
+                params['patient_position'] = 'FFP'  # Feet First Prone
+            elif patient_position_code == 3:
+                params['patient_position'] = 'HFS'  # Head First Supine
+            elif patient_position_code == 4:
+                params['patient_position'] = 'HFP'  # Head First Prone
+            else:
+                params['patient_position'] = 'UNKNOWN'
+            continue
+
+        # Extract Bits Allocated
+        match = re.search(r'Screen Format \(8/16 bit\).*?: (\d+)', line)
+        if match:
+            bits_allocated = int(match.group(1))
+            params['bits_allocated'] = bits_allocated
+            params['bits_stored'] = bits_allocated
+            params['high_bit'] = bits_allocated - 1
+            continue
+
+        # Extract Modality (if available)
+        match = re.search(r'Exam Type.*?: (.*)', line)
+        if match:
+            exam_type = match.group(1).strip()
+            params['modality'] = exam_type
+            continue
+
+        # Extract Patient ID and Name
+        match = re.search(r'Patient ID for this exam.*?: (.*)', line)
+        if match:
+            params['patient_id'] = match.group(1).strip()
+            continue
+
+        match = re.search(r'Patient Name.*?: (.*)', line)
+        if match:
+            params['patient_name'] = match.group(1).strip()
+            continue
+
+        # Extract Acquisition Date/Time
+        match = re.search(r'Actual Image Date/Time stamp.*?: (.*)', line)
+        if match:
+            date_time_str = match.group(1).strip()
+            try:
+                date_time_obj = datetime.datetime.strptime(date_time_str, '%a %b  %d %H:%M:%S %Y')
+                params['acquisition_date'] = date_time_obj.strftime('%Y%m%d')
+                params['acquisition_time'] = date_time_obj.strftime('%H%M%S')
+            except ValueError:
+                pass
+            continue
+
+    return params
 
 input_directory = "../datasets/VisibleHuman/Male/Thigh/VisibleHumanThigh"
 output_directory = "./output_dicom"
