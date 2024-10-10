@@ -7,7 +7,7 @@ import re
 import os
 
 def img_data_to_np_array(image_data_bytes):
-    img_array = np.frombuffer(image_data_bytes, dtype=np.uint16)
+    img_array = np.frombuffer(image_data_bytes, dtype=np.int16).byteswap()
 
     expected_size = 512 * 512
     if img_array.size != expected_size:
@@ -36,6 +36,11 @@ def file_processing(fre_files, input_directory, output_directory, header_directo
         if int(file_index) <= 2028:
             continue
         fre_file_path = os.path.join(input_directory, filename)
+        bone_output_directory = os.path.join(output_directory, 'bone')
+        soft_tissue_output_directory = os.path.join(output_directory, 'soft_tissue')
+        air_output_directory = os.path.join(output_directory, 'air')
+        original_output_directory = os.path.join(output_directory, 'original')
+
         # Corresponding header file path
         header_filename = filename + '.txt'
         header_file_path = os.path.join(header_directory, header_filename)
@@ -46,13 +51,38 @@ def file_processing(fre_files, input_directory, output_directory, header_directo
 
         params = parse_header_file(header_file_path)
         slice_location = params.get('slice_location')
-        img_array = img_data_to_np_array(image_data_bytes).byteswap()
-
-        output_filename = os.path.splitext(filename)[0] + '.dcm'
-        output_dcm_path = os.path.join(output_directory, output_filename)
+        img_array = img_data_to_np_array(image_data_bytes)
+        hu_values = img_array - 1024
 
         instance_number = extract_image_number(filename)
 
+        # Create mask
+        bone_mask = hu_values > 350
+        soft_tissue_mask = (hu_values > -800) & (hu_values <= 350)
+        air_mask = hu_values <= -800
+
+        img_array_bone = np.where(bone_mask, img_array, -1024).astype(np.int16)
+        img_array_soft_tissue = np.where(soft_tissue_mask, img_array, -1024).astype(np.int16)
+        img_array_air = np.where(air_mask, img_array, -1024).astype(np.int16)
+
+        # Save bone image
+        bone_output_filename = os.path.splitext(filename)[0] + '_bone.dcm'
+        bone_output_dcm_path = os.path.join(bone_output_directory, bone_output_filename)
+        create_dicom(img_array_bone, slice_location, bone_output_dcm_path, instance_number, study_instance_uid, series_instance_uid, params)
+
+        # Save soft tissue image
+        soft_tissue_output_filename = os.path.splitext(filename)[0] + '_soft_tissue.dcm'
+        soft_tissue_output_dcm_path = os.path.join(soft_tissue_output_directory, soft_tissue_output_filename)
+        create_dicom(img_array_soft_tissue, slice_location, soft_tissue_output_dcm_path, instance_number, study_instance_uid, series_instance_uid, params)
+
+        # Save air image
+        air_output_filename = os.path.splitext(filename)[0] + '_air.dcm'
+        air_output_dcm_path = os.path.join(air_output_directory, air_output_filename)
+        create_dicom(img_array_air, slice_location, air_output_dcm_path, instance_number, study_instance_uid, series_instance_uid, params)
+
+        # Save original image
+        output_filename = os.path.splitext(filename)[0] + '.dcm'
+        output_dcm_path = os.path.join(original_output_directory, output_filename)
         create_dicom(img_array, slice_location, output_dcm_path, instance_number, study_instance_uid, series_instance_uid, params)
 
 def get_slice_location(header_file_path):
@@ -98,7 +128,7 @@ def create_dicom(img_array, slice_location, output_dcm_path, instance_number, st
     ds.BitsAllocated = int(params.get('bits_allocated', 16))
     ds.BitsStored = int(params.get('bits_stored', 16))
     ds.HighBit = int(params.get('high_bit', 15))
-    ds.PixelRepresentation = int(params.get('pixel_representation', 0))  # Unsigned integer
+    ds.PixelRepresentation = 1
 
     # Set pixel spacing and slice thickness
     ds.PixelSpacing = [
