@@ -43,7 +43,7 @@ class UNet(nn.Module):
         self.bottleneck = DoubleConv(features[-1], features[-1] * 2)
         self.final_conv = nn.Conv2d(features[0], out_channels, kernel_size=1)
 
-    def forward(self, x):
+    def forward(self, x, apply_softmax=False):
         skip_connections = []
 
         for down in self.downs:
@@ -63,13 +63,17 @@ class UNet(nn.Module):
 
             concat_skip = torch.cat((skip_connection, x), dim=1)
             x = self.ups[idx + 1](concat_skip)
+
+        x = self.final_conv(x)
+        # if apply_softmax:
+        #     x = torch.softmax(x, dim=1)
         
-        return self.final_conv(x)
+        return x
 
 def test():
-    x = torch.randn((3, 1, 161, 161))
+    x = torch.randn((3, 1, 256, 256))
     model = UNet(in_channels=1, out_channels=3)
-    preds = model(x)
+    preds = model(x, apply_softmax=True)
     print(preds.shape)
     print(x.shape)
     assert preds.shape[0] == x.shape[0]
